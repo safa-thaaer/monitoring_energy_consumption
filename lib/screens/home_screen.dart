@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart' hide TextDirection;
 import '../services/firebase_service.dart';
+import '../services/test_data_service.dart';
 import '../models/energy_data.dart';
 import '../models/notification_item.dart';
 import 'dashboard_view.dart';
@@ -19,6 +20,7 @@ class EnergyMonitorHome extends StatefulWidget {
 class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   int _selectedIndex = 0;
   final FirebaseService _firebaseService = FirebaseService();
+  final TestDataService _testDataService = TestDataService();
 
   // Live Data
   double power = 0.0;
@@ -175,12 +177,59 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   }
 
   void _updateDashboard(Map<dynamic, dynamic> data) {
+    // طباعة جميع البيانات الواردة للتحقق
+    developer.log(
+      '📦 البيانات الكاملة المستلمة: $data',
+      name: 'UpdateDashboard',
+    );
+
+    // طباعة كل حقل على حدة
+    developer.log(
+      '⚡ power_W = ${data['power_W']} (نوع: ${data['power_W']?.runtimeType})',
+      name: 'UpdateDashboard',
+    );
+    developer.log(
+      '🔋 energy_kWh = ${data['energy_kWh']} (نوع: ${data['energy_kWh']?.runtimeType})',
+      name: 'UpdateDashboard',
+    );
+    developer.log(
+      '⚡ voltage_V = ${data['voltage_V']} (نوع: ${data['voltage_V']?.runtimeType})',
+      name: 'UpdateDashboard',
+    );
+    developer.log(
+      '🔌 current_A = ${data['current_A']} (نوع: ${data['current_A']?.runtimeType})',
+      name: 'UpdateDashboard',
+    );
+    developer.log(
+      '🌍 co2_kg = ${data['co2_kg']} (نوع: ${data['co2_kg']?.runtimeType})',
+      name: 'UpdateDashboard',
+    );
+
     setState(() {
       power = (data['power_W'] ?? 0.0).toDouble();
       energy = (data['energy_kWh'] ?? 0.0).toDouble();
       co2 = (data['co2_kg'] ?? energy * 0.4).toDouble();
       voltage = (data['voltage_V'] ?? 0.0).toDouble();
       current = (data['current_A'] ?? 0.0).toDouble();
+
+      // طباعة القيم النهائية بعد التحويل
+      developer.log(
+        '✅ القيم النهائية - Power: $power W, Energy: $energy kWh, Voltage: $voltage V, Current: $current A',
+        name: 'UpdateDashboard',
+      );
+
+      // إذا جميع القيم أصفار، تحذير في الـ Log
+      if (power == 0.0 && energy == 0.0 && voltage == 0.0 && current == 0.0) {
+        developer.log(
+          '⚠️ جميع القيم المستلمة = 0! تحقق من اتصال المستشعرات مع ESP32',
+          name: 'HomeScreen',
+        );
+        developer.log(
+          '💡 نصيحة: اضغط زر الاختبار 🧪 لإضافة بيانات تجريبية',
+          name: 'HomeScreen',
+        );
+      }
+
       lastUpdate = DateFormat('HH:mm:ss').format(DateTime.now());
     });
   }
@@ -266,35 +315,87 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
       }
     });
   }
-
-  List<FlSpot> _getDailyChartData() {
-    final last24Hours = historicalData.where((d) {
-      return d.dateTime.isAfter(
-        DateTime.now().subtract(const Duration(hours: 24)),
-      );
-    }).toList();
-
-    final Map<int, List<double>> hourlyData = {};
-
-    for (var d in last24Hours) {
-      final hour = d.dateTime.hour;
-      if (!hourlyData.containsKey(hour)) {
-        hourlyData[hour] = [];
-      }
-      hourlyData[hour]!.add(d.energy);
-    }
-
-    List<FlSpot> spots = [];
-    for (int i = 0; i < 24; i++) {
-      final values = hourlyData[i];
-      final avg = values != null && values.isNotEmpty
-          ? values.reduce((a, b) => a + b) / values.length
-          : 0.0;
-      spots.add(FlSpot(i.toDouble(), avg));
-    }
-
-    return spots;
+List<FlSpot> _getDailyChartData() {
+  // لو مافي بيانات، نرجع بيانات افتراضية للتجربة
+  if (historicalData.isEmpty) {
+    return List.generate(24, (i) => FlSpot(i.toDouble(), 0.0));
   }
+
+  final last24Hours = historicalData.where((d) {
+    return d.dateTime.isAfter(
+      DateTime.now().subtract(const Duration(hours: 24)),
+    );
+  }).toList();
+
+  final Map<int, List<double>> hourlyData = {};
+
+  // جمع البيانات حسب الساعة
+  for (var d in last24Hours) {
+    final hour = d.dateTime.hour;
+    if (!hourlyData.containsKey(hour)) {
+      hourlyData[hour] = [];
+    }
+    hourlyData[hour]!.add(d.energy);
+  }
+
+  List<FlSpot> spots = [];
+  for (int i = 0; i < 24; i++) {
+    final values = hourlyData[i];
+    final avg = values != null && values.isNotEmpty
+        ? values.reduce((a, b) => a + b) / values.length
+        : 0.0;
+    spots.add(FlSpot(i.toDouble(), avg));
+  }
+
+  // لو كل النقاط صفر، نحط بيانات تجريبية
+  final hasData = spots.any((spot) => spot.y > 0);
+  if (!hasData && power > 0) {
+    // نستخدم القيمة الحالية كمثال
+    final currentHour = DateTime.now().hour;
+    spots[currentHour] = FlSpot(currentHour.toDouble(), energy);
+  }
+
+  return spots;
+}// دالة لحساب بيانات الرسم البياني الأسبوعي (CO₂)
+List<FlSpot> _getWeeklyCO2ChartData() {
+  if (historicalData.isEmpty) {
+    return List.generate(7, (i) => FlSpot(i.toDouble(), 0.0));
+  }
+
+  final last7Days = historicalData.where((d) {
+    return d.dateTime.isAfter(
+      DateTime.now().subtract(const Duration(days: 7)),
+    );
+  }).toList();
+
+  // نحسب CO₂ لكل يوم
+  final Map<int, List<double>> dailyData = {};
+
+  for (var d in last7Days) {
+    final dayOfWeek = d.dateTime.weekday; // 1=الاثنين, 7=الأحد
+    if (!dailyData.containsKey(dayOfWeek)) {
+      dailyData[dayOfWeek] = [];
+    }
+    // CO₂ = energy * 0.4
+    final co2Value = d.energy * 0.4;
+    dailyData[dayOfWeek]!.add(co2Value);
+  }
+
+  List<FlSpot> spots = [];
+  // نبدأ من السبت (6) لحد الجمعة (5)
+  final daysOrder = [6, 7, 1, 2, 3, 4, 5]; // السبت للجمعة
+  
+  for (int i = 0; i < 7; i++) {
+    final dayOfWeek = daysOrder[i];
+    final values = dailyData[dayOfWeek];
+    final total = values != null && values.isNotEmpty
+        ? values.reduce((a, b) => a + b)
+        : 0.0;
+    spots.add(FlSpot(i.toDouble(), total));
+  }
+
+  return spots;
+}
 
   @override
   Widget build(BuildContext context) {
@@ -324,12 +425,13 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
                       co2: co2,
                     ),
                     AnalyticsView(
-                      chartData: _getDailyChartData(),
-                      avgDaily: avgDaily,
-                      minConsumption: minConsumption,
-                      maxConsumption: maxConsumption,
-                      weeklyTotal: weeklyTotal,
-                    ),
+  dailyChartData: _getDailyChartData(),
+  weeklyChartData: _getWeeklyCO2ChartData(),
+  avgDaily: avgDaily,
+  minConsumption: minConsumption,
+  maxConsumption: maxConsumption,
+  weeklyTotal: weeklyTotal,
+),
                     NotificationsView(notifications: notifications),
                   ],
                 ),
@@ -360,18 +462,47 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
       ),
       child: Column(
         children: [
-          const Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Icon(Icons.bolt, color: Colors.yellow, size: 40),
-              SizedBox(width: 12),
-              Text(
-                'نظام مراقبة استهلاك الطاقة',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
+              const Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.bolt, color: Colors.yellow, size: 40),
+                    SizedBox(width: 12),
+                    Flexible(
+                      child: Text(
+                        'نظام مراقبة استهلاك الطاقة',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
+              ),
+              // زر لإضافة بيانات تجريبية (للاختبار فقط)
+              IconButton(
+                onPressed: () async {
+                  developer.log(
+                    '🧪 إضافة بيانات تجريبية للاختبار...',
+                    name: 'HomeScreen',
+                  );
+                  await _testDataService.addMultipleTestReadings(count: 24);
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('✅ تم إضافة 24 قراءة تجريبية!'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.science, color: Colors.white70),
+                tooltip: 'إضافة بيانات تجريبية للاختبار',
               ),
             ],
           ),
