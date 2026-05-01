@@ -9,6 +9,7 @@ import 'dashboard_view.dart';
 import 'analytics_view.dart';
 import 'notifications_view.dart';
 import 'dart:developer' as developer;
+import 'dart:async'; // ✅ FIXED: مضاف
 
 class EnergyMonitorHome extends StatefulWidget {
   const EnergyMonitorHome({super.key});
@@ -21,6 +22,10 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   int _selectedIndex = 0;
   final FirebaseService _firebaseService = FirebaseService();
   final TestDataService _testDataService = TestDataService();
+
+  // ✅ FIXED: StreamSubscriptions لإدارة الـ streams
+  StreamSubscription? _connectionSubscription;
+  StreamSubscription? _dataSubscription;
 
   // Live Data
   double power = 0.0;
@@ -44,50 +49,50 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   @override
   void initState() {
     super.initState();
-    _testFirebaseConnection();
+    _listenToConnectionStatus(); // ✅ FIXED: بدل _testFirebaseConnection
     _setupFirebaseListener();
   }
 
-  // دالة للتحقق من اتصال Firebase
-  Future<void> _testFirebaseConnection() async {
-    developer.log('🚀 بدء اختبار اتصال Firebase...', name: 'HomeScreen');
+  // ✅ FIXED: dispose لإلغاء الـ streams عند إغلاق الشاشة
+  @override
+  void dispose() {
+    _connectionSubscription?.cancel();
+    _dataSubscription?.cancel();
+    super.dispose();
+  }
 
-    // التحقق من الاتصال
-    final connected = await _firebaseService.checkConnection();
-    developer.log(
-      '📡 حالة الاتصال: ${connected ? "✅ متصل" : "❌ غير متصل"}',
-      name: 'HomeScreen',
+  // ✅ FIXED: دالة جديدة تستمع باستمرار لحالة الاتصال
+  void _listenToConnectionStatus() {
+    developer.log('📡 بدء الاستماع المستمر لحالة الاتصال...', name: 'HomeScreen');
+
+    _connectionSubscription = _firebaseService.connectionStream.listen(
+      (connected) {
+        developer.log(
+          '🔌 حالة الاتصال: ${connected ? "✅ متصل" : "❌ غير متصل"}',
+          name: 'HomeScreen',
+        );
+        if (mounted) {
+          setState(() {
+            isConnected = connected;
+          });
+        }
+      },
+      onError: (error) {
+        developer.log('❌ خطأ في stream الاتصال: $error', name: 'HomeScreen');
+        if (mounted) {
+          setState(() {
+            isConnected = false;
+          });
+        }
+      },
     );
-
-    // عرض جميع البيانات المتاحة
-    await _firebaseService.debugPrintAllData();
-
-    // محاولة قراءة البيانات مباشرة
-    final data = await _firebaseService.readData();
-    if (data != null) {
-      developer.log('✅ تم استلام البيانات بنجاح!', name: 'HomeScreen');
-    } else {
-      developer.log('❌ فشل استلام البيانات - تحقق من:', name: 'HomeScreen');
-      developer.log('  1. هل ESP32 يعمل ومتصل بالإنترنت؟', name: 'HomeScreen');
-      developer.log(
-        '  2. هل ESP32 يرسل البيانات إلى Firebase؟',
-        name: 'HomeScreen',
-      );
-      developer.log(
-        '  3. هل قواعد Firebase Database تسمح بالقراءة؟',
-        name: 'HomeScreen',
-      );
-      developer.log(
-        '  4. هل المسار "/readings" صحيح في قاعدة البيانات؟',
-        name: 'HomeScreen',
-      );
-    }
   }
 
   void _setupFirebaseListener() {
     developer.log('👂 بدء الاستماع لتحديثات Firebase...', name: 'HomeScreen');
 
-    _firebaseService.dataStream.listen(
+    // ✅ FIXED: نحفظ الـ subscription
+    _dataSubscription = _firebaseService.dataStream.listen(
       (event) {
         try {
           developer.log('📥 تم استلام حدث من Firebase', name: 'HomeScreen');
@@ -97,9 +102,7 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
               '⚠️ البيانات المستلمة فارغة (null)',
               name: 'HomeScreen',
             );
-            setState(() {
-              isConnected = false;
-            });
+            // ✅ FIXED: حذفنا isConnected = false من هنا
             return;
           }
 
@@ -137,9 +140,7 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
             _storeHistoricalData(latestTimestamp.toString(), latestData);
             _checkForAnomalies(latestData);
 
-            setState(() {
-              isConnected = true;
-            });
+            // ✅ FIXED: حذفنا isConnected = true من هنا، connectionStream يتكفل بها
 
             developer.log('🎉 تم تحديث الواجهة بنجاح!', name: 'HomeScreen');
           } else {
@@ -155,9 +156,7 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
             error: e,
             stackTrace: stackTrace,
           );
-          setState(() {
-            isConnected = false;
-          });
+          // ✅ FIXED: حذفنا isConnected = false من هنا
         }
       },
       onError: (error) {
@@ -166,9 +165,7 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
           name: 'HomeScreen',
           error: error,
         );
-        setState(() {
-          isConnected = false;
-        });
+        // ✅ FIXED: حذفنا isConnected = false من هنا
       },
       onDone: () {
         developer.log('⚠️ انتهى الاستماع لـ Firebase', name: 'HomeScreen');
@@ -177,13 +174,11 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   }
 
   void _updateDashboard(Map<dynamic, dynamic> data) {
-    // طباعة جميع البيانات الواردة للتحقق
     developer.log(
       '📦 البيانات الكاملة المستلمة: $data',
       name: 'UpdateDashboard',
     );
 
-    // طباعة كل حقل على حدة
     developer.log(
       '⚡ power_W = ${data['power_W']} (نوع: ${data['power_W']?.runtimeType})',
       name: 'UpdateDashboard',
@@ -212,13 +207,11 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
       voltage = (data['voltage_V'] ?? 0.0).toDouble();
       current = (data['current_A'] ?? 0.0).toDouble();
 
-      // طباعة القيم النهائية بعد التحويل
       developer.log(
         '✅ القيم النهائية - Power: $power W, Energy: $energy kWh, Voltage: $voltage V, Current: $current A',
         name: 'UpdateDashboard',
       );
 
-      // إذا جميع القيم أصفار، تحذير في الـ Log
       if (power == 0.0 && energy == 0.0 && voltage == 0.0 && current == 0.0) {
         developer.log(
           '⚠️ جميع القيم المستلمة = 0! تحقق من اتصال المستشعرات مع ESP32',
@@ -235,24 +228,41 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   }
 
   void _storeHistoricalData(String timestamp, Map<dynamic, dynamic> data) {
-    final dateTime = DateTime.fromMillisecondsSinceEpoch(int.parse(timestamp));
-    final energyData = EnergyData(
-      timestamp: timestamp,
-      dateTime: dateTime,
-      power: (data['power_W'] ?? 0.0).toDouble(),
-      energy: (data['energy_kWh'] ?? 0.0).toDouble(),
-      voltage: (data['voltage_V'] ?? 0.0).toDouble(),
-      current: (data['current_A'] ?? 0.0).toDouble(),
-    );
+    try {
+      // ✅ FIXED: معالجة timestamps بالثواني أو الميلي ثانية
+      int tsInt = int.tryParse(timestamp) ?? 0;
+      DateTime dateTime;
+      if (tsInt > 1000000000000) {
+        dateTime = DateTime.fromMillisecondsSinceEpoch(tsInt);
+      } else {
+        dateTime = DateTime.fromMillisecondsSinceEpoch(tsInt * 1000);
+      }
 
-    setState(() {
-      historicalData.add(energyData);
+      // ✅ FIXED: تجنب تكرار نفس الـ timestamp
+      if (historicalData.any((e) => e.timestamp == timestamp)) return;
 
-      final sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7));
-      historicalData.removeWhere((d) => d.dateTime.isBefore(sevenDaysAgo));
+      final energyData = EnergyData(
+        timestamp: timestamp,
+        dateTime: dateTime,
+        power: (data['power_W'] ?? 0.0).toDouble(),
+        energy: (data['energy_kWh'] ?? 0.0).toDouble(),
+        voltage: (data['voltage_V'] ?? 0.0).toDouble(),
+        current: (data['current_A'] ?? 0.0).toDouble(),
+      );
 
-      _updateStatistics();
-    });
+      setState(() {
+        historicalData.add(energyData);
+
+        final sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7));
+        historicalData.removeWhere((d) => d.dateTime.isBefore(sevenDaysAgo));
+
+        historicalData.sort((a, b) => a.dateTime.compareTo(b.dateTime));
+
+        _updateStatistics();
+      });
+    } catch (e) {
+      developer.log('❌ خطأ في تخزين البيانات التاريخية: $e', name: 'HomeScreen');
+    }
   }
 
   void _updateStatistics() {
@@ -315,87 +325,82 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
       }
     });
   }
-List<FlSpot> _getDailyChartData() {
-  // لو مافي بيانات، نرجع بيانات افتراضية للتجربة
-  if (historicalData.isEmpty) {
-    return List.generate(24, (i) => FlSpot(i.toDouble(), 0.0));
-  }
 
-  final last24Hours = historicalData.where((d) {
-    return d.dateTime.isAfter(
-      DateTime.now().subtract(const Duration(hours: 24)),
-    );
-  }).toList();
-
-  final Map<int, List<double>> hourlyData = {};
-
-  // جمع البيانات حسب الساعة
-  for (var d in last24Hours) {
-    final hour = d.dateTime.hour;
-    if (!hourlyData.containsKey(hour)) {
-      hourlyData[hour] = [];
+  List<FlSpot> _getDailyChartData() {
+    if (historicalData.isEmpty) {
+      return List.generate(24, (i) => FlSpot(i.toDouble(), 0.0));
     }
-    hourlyData[hour]!.add(d.energy);
-  }
 
-  List<FlSpot> spots = [];
-  for (int i = 0; i < 24; i++) {
-    final values = hourlyData[i];
-    final avg = values != null && values.isNotEmpty
-        ? values.reduce((a, b) => a + b) / values.length
-        : 0.0;
-    spots.add(FlSpot(i.toDouble(), avg));
-  }
+    final last24Hours = historicalData.where((d) {
+      return d.dateTime.isAfter(
+        DateTime.now().subtract(const Duration(hours: 24)),
+      );
+    }).toList();
 
-  // لو كل النقاط صفر، نحط بيانات تجريبية
-  final hasData = spots.any((spot) => spot.y > 0);
-  if (!hasData && power > 0) {
-    // نستخدم القيمة الحالية كمثال
-    final currentHour = DateTime.now().hour;
-    spots[currentHour] = FlSpot(currentHour.toDouble(), energy);
-  }
+    final Map<int, List<double>> hourlyData = {};
 
-  return spots;
-}// دالة لحساب بيانات الرسم البياني الأسبوعي (CO₂)
-List<FlSpot> _getWeeklyCO2ChartData() {
-  if (historicalData.isEmpty) {
-    return List.generate(7, (i) => FlSpot(i.toDouble(), 0.0));
-  }
-
-  final last7Days = historicalData.where((d) {
-    return d.dateTime.isAfter(
-      DateTime.now().subtract(const Duration(days: 7)),
-    );
-  }).toList();
-
-  // نحسب CO₂ لكل يوم
-  final Map<int, List<double>> dailyData = {};
-
-  for (var d in last7Days) {
-    final dayOfWeek = d.dateTime.weekday; // 1=الاثنين, 7=الأحد
-    if (!dailyData.containsKey(dayOfWeek)) {
-      dailyData[dayOfWeek] = [];
+    for (var d in last24Hours) {
+      final hour = d.dateTime.hour;
+      if (!hourlyData.containsKey(hour)) {
+        hourlyData[hour] = [];
+      }
+      hourlyData[hour]!.add(d.energy);
     }
-    // CO₂ = energy * 0.4
-    final co2Value = d.energy * 0.4;
-    dailyData[dayOfWeek]!.add(co2Value);
+
+    List<FlSpot> spots = [];
+    for (int i = 0; i < 24; i++) {
+      final values = hourlyData[i];
+      final avg = values != null && values.isNotEmpty
+          ? values.reduce((a, b) => a + b) / values.length
+          : 0.0;
+      spots.add(FlSpot(i.toDouble(), avg));
+    }
+
+    final hasData = spots.any((spot) => spot.y > 0);
+    if (!hasData && power > 0) {
+      final currentHour = DateTime.now().hour;
+      spots[currentHour] = FlSpot(currentHour.toDouble(), energy);
+    }
+
+    return spots;
   }
 
-  List<FlSpot> spots = [];
-  // نبدأ من السبت (6) لحد الجمعة (5)
-  final daysOrder = [6, 7, 1, 2, 3, 4, 5]; // السبت للجمعة
-  
-  for (int i = 0; i < 7; i++) {
-    final dayOfWeek = daysOrder[i];
-    final values = dailyData[dayOfWeek];
-    final total = values != null && values.isNotEmpty
-        ? values.reduce((a, b) => a + b)
-        : 0.0;
-    spots.add(FlSpot(i.toDouble(), total));
-  }
+  List<FlSpot> _getWeeklyCO2ChartData() {
+    if (historicalData.isEmpty) {
+      return List.generate(7, (i) => FlSpot(i.toDouble(), 0.0));
+    }
 
-  return spots;
-}
+    final last7Days = historicalData.where((d) {
+      return d.dateTime.isAfter(
+        DateTime.now().subtract(const Duration(days: 7)),
+      );
+    }).toList();
+
+    final Map<int, List<double>> dailyData = {};
+
+    for (var d in last7Days) {
+      final dayOfWeek = d.dateTime.weekday;
+      if (!dailyData.containsKey(dayOfWeek)) {
+        dailyData[dayOfWeek] = [];
+      }
+      final co2Value = d.energy * 0.4;
+      dailyData[dayOfWeek]!.add(co2Value);
+    }
+
+    List<FlSpot> spots = [];
+    final daysOrder = [6, 7, 1, 2, 3, 4, 5];
+
+    for (int i = 0; i < 7; i++) {
+      final dayOfWeek = daysOrder[i];
+      final values = dailyData[dayOfWeek];
+      final total = values != null && values.isNotEmpty
+          ? values.reduce((a, b) => a + b)
+          : 0.0;
+      spots.add(FlSpot(i.toDouble(), total));
+    }
+
+    return spots;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -425,13 +430,13 @@ List<FlSpot> _getWeeklyCO2ChartData() {
                       co2: co2,
                     ),
                     AnalyticsView(
-  dailyChartData: _getDailyChartData(),
-  weeklyChartData: _getWeeklyCO2ChartData(),
-  avgDaily: avgDaily,
-  minConsumption: minConsumption,
-  maxConsumption: maxConsumption,
-  weeklyTotal: weeklyTotal,
-),
+                      dailyChartData: _getDailyChartData(),
+                      weeklyChartData: _getWeeklyCO2ChartData(),
+                      avgDaily: avgDaily,
+                      minConsumption: minConsumption,
+                      maxConsumption: maxConsumption,
+                      weeklyTotal: weeklyTotal,
+                    ),
                     NotificationsView(notifications: notifications),
                   ],
                 ),
@@ -484,7 +489,6 @@ List<FlSpot> _getWeeklyCO2ChartData() {
                   ],
                 ),
               ),
-              // زر لإضافة بيانات تجريبية (للاختبار فقط)
               IconButton(
                 onPressed: () async {
                   developer.log(

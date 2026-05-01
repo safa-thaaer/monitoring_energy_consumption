@@ -10,6 +10,14 @@ class FirebaseService {
   // المسارات الشائعة: 'readings', 'sensor_data', 'energy_data'
   Stream<DatabaseEvent> get dataStream => _database.child('readings').onValue;
 
+  // ✅ FIXED: Stream مستمر لحالة الاتصال - يحدث الـ UI فوراً
+  Stream<bool> get connectionStream {
+    return FirebaseDatabase.instance
+        .ref('.info/connected')
+        .onValue
+        .map((event) => event.snapshot.value as bool? ?? false);
+  }
+
   // دالة للتحقق من الاتصال
   Future<bool> checkConnection() async {
     try {
