@@ -67,7 +67,9 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
         }
       },
       onError: (_) {
-        if (mounted) setState(() => isConnected = false);
+        if (mounted) {
+          setState(() => isConnected = false);
+        }
       },
     );
   }
@@ -80,13 +82,17 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
 
         try {
           final data = event.snapshot.value as Map<dynamic, dynamic>;
-          final timestamps = data.keys.toList()..sort((a, b) => b.compareTo(a));
+
+          // ✅ ترتيب يشتغل مع أي نوع مفتاح (نص أو رقم)
+          final timestamps = data.keys.toList()
+            ..sort((a, b) => b.toString().compareTo(a.toString()));
+
           if (timestamps.isEmpty) return;
 
           final latestTimestamp = timestamps[0];
           final latestData = data[latestTimestamp] as Map<dynamic, dynamic>;
 
-          // ✅ كل الحسابات قبل setState — بدون setState متداخلة
+          // القراءات
           final newPower   = (latestData['power_W']    ?? 0.0).toDouble();
           final newEnergy  = (latestData['energy_kWh'] ?? 0.0).toDouble();
           final newCo2     = (latestData['co2_kg']     ?? newEnergy * 0.4).toDouble();
@@ -94,12 +100,18 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
           final newCurrent = (latestData['current_A']  ?? 0.0).toDouble();
           final newTime    = DateFormat('HH:mm:ss').format(DateTime.now());
 
-          // ✅ حساب التاريخي خارج setState
-          final tsInt = int.tryParse(latestTimestamp.toString()) ?? 0;
-          final dt = tsInt > 1000000000000
-              ? DateTime.fromMillisecondsSinceEpoch(tsInt)
-              : DateTime.fromMillisecondsSinceEpoch(tsInt * 1000);
+          // ✅ تحويل الـ timestamp — يشتغل مع Unix رقم أو تاريخ نص "2026-05-01"
+          DateTime dt;
+          try {
+            final tsInt = int.parse(latestTimestamp.toString());
+            dt = tsInt > 1000000000000
+                ? DateTime.fromMillisecondsSinceEpoch(tsInt)
+                : DateTime.fromMillisecondsSinceEpoch(tsInt * 1000);
+          } catch (_) {
+            dt = DateTime.tryParse(latestTimestamp.toString()) ?? DateTime.now();
+          }
 
+          // البيانات التاريخية
           final alreadyExists = historicalData.any(
             (e) => e.timestamp == latestTimestamp.toString(),
           );
@@ -116,14 +128,13 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
             ));
             final cutoff = DateTime.now().subtract(const Duration(days: 7));
             newHistorical.removeWhere((e) => e.dateTime.isBefore(cutoff));
-            // ✅ حد أقصى 500 عنصر لمنع التثقيل
             if (newHistorical.length > 500) {
               newHistorical = newHistorical.sublist(newHistorical.length - 500);
             }
             newHistorical.sort((a, b) => a.dateTime.compareTo(b.dateTime));
           }
 
-          // ✅ حساب الإحصائيات خارج setState
+          // الإحصائيات
           double newAvg = 0, newMin = 0, newMax = 0, newTotal = 0;
           if (newHistorical.isNotEmpty) {
             final vals = newHistorical.map((d) => d.energy).toList();
@@ -133,7 +144,7 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
             newMax   = vals.reduce((a, b) => a > b ? a : b);
           }
 
-          // ✅ الإشعارات خارج setState
+          // الإشعارات
           final newNotifications = List<NotificationItem>.from(notifications);
           void addAlert(String type, String title, String msg) {
             final dup = newNotifications.any((n) => n.title == title && n.message == msg);
@@ -144,18 +155,20 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
               time: DateFormat('HH:mm:ss').format(DateTime.now()),
               date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
             ));
-            if (newNotifications.length > 10) newNotifications.removeRange(10, newNotifications.length);
+            if (newNotifications.length > 10) {
+              newNotifications.removeRange(10, newNotifications.length);
+            }
           }
           if (newPower > 4000) {
             addAlert('danger', 'تحذير! حمل زائد',
-              'القدرة الحالية ${newPower.toStringAsFixed(1)} W تجاوزت الحد الآمن');
+                'القدرة الحالية ${newPower.toStringAsFixed(1)} W تجاوزت الحد الآمن');
           }
           if (newVoltage > 240 || (newVoltage > 0 && newVoltage < 200)) {
             addAlert('warning', 'تحذير الفولتية',
-              'الفولتية ${newVoltage.toStringAsFixed(1)} V خارج النطاق الطبيعي');
+                'الفولتية ${newVoltage.toStringAsFixed(1)} V خارج النطاق الطبيعي');
           }
 
-          // ✅ setState مرة وحدة فقط تجمع كل التحديثات
+          // setState مرة وحدة فقط
           setState(() {
             power          = newPower;
             energy         = newEnergy;
@@ -346,25 +359,29 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(icon,
-                color: isSelected ? const Color(0xFF2563eb) : Colors.white,
-                size: 20),
+                  color: isSelected ? const Color(0xFF2563eb) : Colors.white,
+                  size: 20),
               const SizedBox(width: 6),
               Flexible(
                 child: Text(label,
-                  style: TextStyle(
-                    color: isSelected ? const Color(0xFF2563eb) : Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                  ),
-                  overflow: TextOverflow.ellipsis),
+                    style: TextStyle(
+                      color: isSelected ? const Color(0xFF2563eb) : Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                    overflow: TextOverflow.ellipsis),
               ),
               if (index == 2 && notifications.isNotEmpty)
                 Container(
                   margin: const EdgeInsets.only(right: 4),
                   padding: const EdgeInsets.all(4),
-                  decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                  decoration: const BoxDecoration(
+                      color: Colors.red, shape: BoxShape.circle),
                   child: Text('${notifications.length}',
-                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold)),
                 ),
             ],
           ),
