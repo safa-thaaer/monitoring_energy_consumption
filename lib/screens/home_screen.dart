@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart' hide TextDirection;
+import 'package:firebase_database/firebase_database.dart';
 import '../services/firebase_service.dart';
-import '../services/test_data_service.dart';
 import '../models/energy_data.dart';
 import '../models/notification_item.dart';
 import 'dashboard_view.dart';
@@ -21,12 +21,10 @@ class EnergyMonitorHome extends StatefulWidget {
 class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   int _selectedIndex = 0;
   final FirebaseService _firebaseService = FirebaseService();
-  final TestDataService _testDataService = TestDataService();
 
   StreamSubscription? _connectionSubscription;
   StreamSubscription? _dataSubscription;
 
-  // Live Data
   double power = 0.0;
   double energy = 0.0;
   double co2 = 0.0;
@@ -35,11 +33,9 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   bool isConnected = false;
   String lastUpdate = '--';
 
-  // Historical Data
   List<EnergyData> historicalData = [];
   List<NotificationItem> notifications = [];
 
-  // Statistics
   double avgDaily = 0.0;
   double minConsumption = 0.0;
   double maxConsumption = 0.0;
@@ -60,144 +56,183 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   }
 
   void _listenToConnectionStatus() {
-    _connectionSubscription = _firebaseService.connectionStream.listen(
-      (connected) {
-        if (mounted && isConnected != connected) {
-          setState(() => isConnected = connected);
-        }
-      },
-      onError: (_) {
-        if (mounted) {
-          setState(() => isConnected = false);
-        }
-      },
-    );
+    _connectionSubscription = _firebaseService.connectionStream.listen((
+      connected,
+    ) {
+      if (mounted && isConnected != connected) {
+        setState(() => isConnected = connected);
+      }
+    });
   }
 
   void _setupFirebaseListener() {
-    _dataSubscription = _firebaseService.dataStream.listen(
-      (event) {
-        if (!mounted) return;
-        if (event.snapshot.value == null) return;
+    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final ref = FirebaseDatabase.instance.ref('readings/$today');
 
-        try {
-          final data = event.snapshot.value as Map<dynamic, dynamic>;
+    _dataSubscription = ref.onValue.listen((event) {
+      if (!mounted) return;
+      if (event.snapshot.value == null) return;
 
-          // ✅ ترتيب يشتغل مع أي نوع مفتاح (نص أو رقم)
-          final timestamps = data.keys.toList()
-            ..sort((a, b) => b.toString().compareTo(a.toString()));
+      try {
+        final data = event.snapshot.value as Map<dynamic, dynamic>;
+        if (data.isEmpty) return;
 
-          if (timestamps.isEmpty) return;
+        int latestKey = 0;
+        Map<dynamic, dynamic>? latestData;
 
-          final latestTimestamp = timestamps[0];
-          final latestData = data[latestTimestamp] as Map<dynamic, dynamic>;
+        data.forEach((key, value) {
+          if (value == null || value is! Map) return;
 
-          // القراءات
-          final newPower   = (latestData['power_W']    ?? 0.0).toDouble();
-          final newEnergy  = (latestData['energy_kWh'] ?? 0.0).toDouble();
-          final newCo2     = (latestData['co2_kg']     ?? newEnergy * 0.4).toDouble();
-          final newVoltage = (latestData['voltage_V']  ?? 0.0).toDouble();
-          final newCurrent = (latestData['current_A']  ?? 0.0).toDouble();
-          final newTime    = DateFormat('HH:mm:ss').format(DateTime.now());
+          final keyStr = key.toString();
+          final keyInt = int.tryParse(keyStr) ?? 0;
 
-          // ✅ تحويل الـ timestamp — يشتغل مع Unix رقم أو تاريخ نص "2026-05-01"
-          DateTime dt;
-          try {
-            final tsInt = int.parse(latestTimestamp.toString());
-            dt = tsInt > 1000000000000
-                ? DateTime.fromMillisecondsSinceEpoch(tsInt)
-                : DateTime.fromMillisecondsSinceEpoch(tsInt * 1000);
-          } catch (_) {
-            dt = DateTime.tryParse(latestTimestamp.toString()) ?? DateTime.now();
+          // ناخذ فقط timestamp مال ESP32 بالثواني، ونتجاهل التجريبي الطويل
+          if (keyStr.length != 10) return;
+
+          // نتأكد القراءة كاملة مو بس voltage
+          final hasAllFields =
+              value.containsKey('voltage_V') &&
+              value.containsKey('current_A') &&
+              value.containsKey('power_W') &&
+              value.containsKey('energy_kWh');
+
+          if (!hasAllFields) return;
+
+          if (keyInt > latestKey) {
+            latestKey = keyInt;
+            latestData = Map<dynamic, dynamic>.from(value);
           }
+        });
 
-          // البيانات التاريخية
-          final alreadyExists = historicalData.any(
-            (e) => e.timestamp == latestTimestamp.toString(),
+        if (latestKey == 0 || latestData == null) {
+          developer.log(
+            '⚠️ لم يتم العثور على قراءة كاملة وصحيحة',
+            name: 'HomeScreen',
+          );
+          return;
+        }
+
+        developer.log('📊 آخر مفتاح صحيح: $latestKey', name: 'HomeScreen');
+        developer.log('📊 البيانات: $latestData', name: 'HomeScreen');
+
+        final newPower = _toDouble(latestData!['power_W']);
+        final newEnergy = _toDouble(latestData!['energy_kWh']);
+        final newVoltage = _toDouble(latestData!['voltage_V']);
+        final newCurrent = _toDouble(latestData!['current_A']);
+        final newCo2 = _toDouble(latestData!['co2_kg']) > 0
+            ? _toDouble(latestData!['co2_kg'])
+            : newEnergy * 0.4;
+
+        developer.log(
+          '✅ Power: $newPower | Voltage: $newVoltage | Current: $newCurrent | Energy: $newEnergy',
+          name: 'HomeScreen',
+        );
+
+        final exists = historicalData.any(
+          (e) => e.timestamp == latestKey.toString(),
+        );
+
+        List<EnergyData> newHistorical = List.from(historicalData);
+
+        if (!exists) {
+          newHistorical.add(
+            EnergyData.fromFirebase(latestKey.toString(), latestData!),
           );
 
-          List<EnergyData> newHistorical = List.from(historicalData);
-          if (!alreadyExists) {
-            newHistorical.add(EnergyData(
-              timestamp: latestTimestamp.toString(),
-              dateTime: dt,
-              power: newPower,
-              energy: newEnergy,
-              voltage: newVoltage,
-              current: newCurrent,
-            ));
-            final cutoff = DateTime.now().subtract(const Duration(days: 7));
-            newHistorical.removeWhere((e) => e.dateTime.isBefore(cutoff));
-            if (newHistorical.length > 500) {
-              newHistorical = newHistorical.sublist(newHistorical.length - 500);
-            }
-            newHistorical.sort((a, b) => a.dateTime.compareTo(b.dateTime));
+          if (newHistorical.length > 200) {
+            newHistorical = newHistorical.sublist(newHistorical.length - 200);
           }
-
-          // الإحصائيات
-          double newAvg = 0, newMin = 0, newMax = 0, newTotal = 0;
-          if (newHistorical.isNotEmpty) {
-            final vals = newHistorical.map((d) => d.energy).toList();
-            newTotal = vals.reduce((a, b) => a + b);
-            newAvg   = newTotal / vals.length;
-            newMin   = vals.reduce((a, b) => a < b ? a : b);
-            newMax   = vals.reduce((a, b) => a > b ? a : b);
-          }
-
-          // الإشعارات
-          final newNotifications = List<NotificationItem>.from(notifications);
-          void addAlert(String type, String title, String msg) {
-            final dup = newNotifications.any((n) => n.title == title && n.message == msg);
-            if (dup) return;
-            newNotifications.insert(0, NotificationItem(
-              id: DateTime.now().millisecondsSinceEpoch.toString(),
-              type: type, title: title, message: msg,
-              time: DateFormat('HH:mm:ss').format(DateTime.now()),
-              date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
-            ));
-            if (newNotifications.length > 10) {
-              newNotifications.removeRange(10, newNotifications.length);
-            }
-          }
-          if (newPower > 4000) {
-            addAlert('danger', 'تحذير! حمل زائد',
-                'القدرة الحالية ${newPower.toStringAsFixed(1)} W تجاوزت الحد الآمن');
-          }
-          if (newVoltage > 240 || (newVoltage > 0 && newVoltage < 200)) {
-            addAlert('warning', 'تحذير الفولتية',
-                'الفولتية ${newVoltage.toStringAsFixed(1)} V خارج النطاق الطبيعي');
-          }
-
-          // setState مرة وحدة فقط
-          setState(() {
-            power          = newPower;
-            energy         = newEnergy;
-            co2            = newCo2;
-            voltage        = newVoltage;
-            current        = newCurrent;
-            lastUpdate     = newTime;
-            historicalData = newHistorical;
-            notifications  = newNotifications;
-            avgDaily       = newAvg;
-            minConsumption = newMin;
-            maxConsumption = newMax;
-            weeklyTotal    = newTotal;
-          });
-
-          developer.log('✅ تحديث: $newPower W | $newVoltage V | $newCurrent A', name: 'HomeScreen');
-        } catch (e) {
-          developer.log('❌ خطأ: $e', name: 'HomeScreen');
         }
-      },
-      onError: (e) => developer.log('❌ خطأ Firebase: $e', name: 'HomeScreen'),
+
+        double newAvg = 0, newMin = 0, newMax = 0, newTotal = 0;
+
+        if (newHistorical.isNotEmpty) {
+          final vals = newHistorical.map((d) => d.energy).toList();
+          newTotal = vals.reduce((a, b) => a + b);
+          newAvg = newTotal / vals.length;
+          newMin = vals.reduce((a, b) => a < b ? a : b);
+          newMax = vals.reduce((a, b) => a > b ? a : b);
+        }
+
+        final newNotifications = List<NotificationItem>.from(notifications);
+
+        if (newPower > 4000) {
+          _addAlert(
+            newNotifications,
+            'danger',
+            'تحذير! حمل زائد',
+            'القدرة الحالية ${newPower.toStringAsFixed(1)} W',
+          );
+        }
+
+        if (newVoltage > 240 || (newVoltage > 0 && newVoltage < 200)) {
+          _addAlert(
+            newNotifications,
+            'warning',
+            'تحذير الفولتية',
+            'الفولتية ${newVoltage.toStringAsFixed(1)} V',
+          );
+        }
+
+        setState(() {
+          power = newPower;
+          energy = newEnergy;
+          co2 = newCo2;
+          voltage = newVoltage;
+          current = newCurrent;
+          lastUpdate = DateFormat('HH:mm:ss').format(DateTime.now());
+          historicalData = newHistorical;
+          notifications = newNotifications;
+          avgDaily = newAvg;
+          minConsumption = newMin;
+          maxConsumption = newMax;
+          weeklyTotal = newTotal;
+        });
+      } catch (e) {
+        developer.log('❌ خطأ: $e', name: 'HomeScreen');
+      }
+    }, onError: (e) => developer.log('❌ خطأ Firebase: $e', name: 'HomeScreen'));
+  }
+
+  double _toDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) return double.tryParse(value) ?? 0.0;
+    return 0.0;
+  }
+
+  void _addAlert(
+    List<NotificationItem> list,
+    String type,
+    String title,
+    String msg,
+  ) {
+    if (list.any((n) => n.title == title && n.message == msg)) return;
+
+    list.insert(
+      0,
+      NotificationItem(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        type: type,
+        title: title,
+        message: msg,
+        time: DateFormat('HH:mm:ss').format(DateTime.now()),
+        date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
+      ),
     );
+
+    if (list.length > 10) list.removeRange(10, list.length);
   }
 
   List<FlSpot> _getDailyChartData() {
-    if (historicalData.isEmpty) return List.generate(24, (i) => FlSpot(i.toDouble(), 0.0));
+    if (historicalData.isEmpty) {
+      return List.generate(24, (i) => FlSpot(i.toDouble(), 0.0));
+    }
 
     final cutoff = DateTime.now().subtract(const Duration(hours: 24));
     final Map<int, List<double>> hourly = {};
+
     for (var d in historicalData.where((d) => d.dateTime.isAfter(cutoff))) {
       hourly.putIfAbsent(d.dateTime.hour, () => []).add(d.energy);
     }
@@ -212,16 +247,24 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
   }
 
   List<FlSpot> _getWeeklyCO2ChartData() {
-    if (historicalData.isEmpty) return List.generate(7, (i) => FlSpot(i.toDouble(), 0.0));
+    if (historicalData.isEmpty) {
+      return List.generate(7, (i) => FlSpot(i.toDouble(), 0.0));
+    }
 
     final cutoff = DateTime.now().subtract(const Duration(days: 7));
     final Map<int, double> daily = {};
+
     for (var d in historicalData.where((d) => d.dateTime.isAfter(cutoff))) {
-      daily[d.dateTime.weekday] = (daily[d.dateTime.weekday] ?? 0) + d.energy * 0.4;
+      daily[d.dateTime.weekday] =
+          (daily[d.dateTime.weekday] ?? 0) + d.energy * 0.4;
     }
 
     final daysOrder = [6, 7, 1, 2, 3, 4, 5];
-    return List.generate(7, (i) => FlSpot(i.toDouble(), daily[daysOrder[i]] ?? 0.0));
+
+    return List.generate(
+      7,
+      (i) => FlSpot(i.toDouble(), daily[daysOrder[i]] ?? 0.0),
+    );
   }
 
   @override
@@ -289,48 +332,25 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
       ),
       child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          const Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Expanded(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.bolt, color: Colors.yellow, size: 40),
-                    SizedBox(width: 12),
-                    Flexible(
-                      child: Text(
-                        'نظام مراقبة استهلاك الطاقة',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
+              Icon(Icons.bolt, color: Colors.yellow, size: 40),
+              SizedBox(width: 12),
+              Flexible(
+                child: Text(
+                  'نظام مراقبة استهلاك الطاقة',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-              ),
-              IconButton(
-                onPressed: () async {
-                  await _testDataService.addMultipleTestReadings(count: 24);
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('✅ تم إضافة 24 قراءة تجريبية!'),
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.science, color: Colors.white70),
-                tooltip: 'إضافة بيانات تجريبية للاختبار',
               ),
             ],
           ),
           const SizedBox(height: 20),
           Row(
-            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               _buildNavButton(0, Icons.bolt, 'الاستهلاك اللحظي'),
               const SizedBox(width: 12),
@@ -346,42 +366,54 @@ class _EnergyMonitorHomeState extends State<EnergyMonitorHome> {
 
   Widget _buildNavButton(int index, IconData icon, String label) {
     final isSelected = _selectedIndex == index;
+
     return Expanded(
       child: GestureDetector(
         onTap: () => setState(() => _selectedIndex = index),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.white : Colors.white.withValues(alpha: 0.2),
+            color: isSelected
+                ? Colors.white
+                : Colors.white.withValues(alpha: 0.2),
             borderRadius: BorderRadius.circular(12),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon,
-                  color: isSelected ? const Color(0xFF2563eb) : Colors.white,
-                  size: 20),
+              Icon(
+                icon,
+                color: isSelected ? const Color(0xFF2563eb) : Colors.white,
+                size: 20,
+              ),
               const SizedBox(width: 6),
               Flexible(
-                child: Text(label,
-                    style: TextStyle(
-                      color: isSelected ? const Color(0xFF2563eb) : Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                    overflow: TextOverflow.ellipsis),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: isSelected ? const Color(0xFF2563eb) : Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
               if (index == 2 && notifications.isNotEmpty)
                 Container(
                   margin: const EdgeInsets.only(right: 4),
                   padding: const EdgeInsets.all(4),
                   decoration: const BoxDecoration(
-                      color: Colors.red, shape: BoxShape.circle),
-                  child: Text('${notifications.length}',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold)),
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    '${notifications.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
             ],
           ),

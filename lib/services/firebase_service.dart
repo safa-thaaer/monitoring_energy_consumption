@@ -8,8 +8,8 @@ class FirebaseService {
 
   // جرب الاستماع لمسار محدد - عدل اسم المسار حسب بنية البيانات في Firebase
   // المسارات الشائعة: 'readings', 'sensor_data', 'energy_data'
-  Stream<DatabaseEvent> get dataStream => _database.child('readings').onValue;
-
+Stream<DatabaseEvent> get dataStream =>
+    _database.child('readings').orderByKey().limitToLast(1).onValue;
   // ✅ FIXED: Stream مستمر لحالة الاتصال - يحدث الـ UI فوراً
   Stream<bool> get connectionStream {
     return FirebaseDatabase.instance
